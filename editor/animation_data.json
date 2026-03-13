@@ -15646,17 +15646,24 @@
     {
       "id": "sprite45",
       "frames": 32,
-      "isContainer": true
+      "isContainer": true,
+      "parents": []
     },
     {
       "id": "sprite40",
       "frames": 140,
-      "isContainer": true
+      "isContainer": true,
+      "parents": [
+        "sprite45"
+      ]
     },
     {
       "id": "sprite37",
       "frames": 71,
-      "isContainer": false
+      "isContainer": false,
+      "parents": [
+        "sprite40"
+      ]
     }
   ]
 }

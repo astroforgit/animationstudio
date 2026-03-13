@@ -136,7 +136,20 @@
     </div>
 
 <script type="module">
-import animationData from './animation_data.json';
+// Load animation data dynamically
+let animationData;
+fetch('./animation_data.json')
+    .then(res => res.json())
+    .then(data => {
+        animationData = data;
+        window.animationData = animationData;
+        console.log('Auto-loaded animation_data.json');
+        initEditor();
+        resizeCanvas();
+    })
+    .catch(err => {
+        console.error('Failed to load animation_data.json:', err);
+    });
 
 /**
  * EDITOR LOGIC & STATE
@@ -234,7 +247,12 @@ function initEditor() {
         data.timelines.forEach(t => {
             const option = document.createElement('option');
             option.value = t.id;
-            option.textContent = t.id + ' (' + t.frames + ' frames)' + (t.id === data.mainTimeline ? ' [MAIN]' : '');
+            // Show parent info if this sprite is nested
+            const parentInfo = t.parents && t.parents.length > 0 ? 
+                ` [in: ${t.parents.join(', ')}]` : '';
+            option.textContent = t.id + ' (' + t.frames + ' frames)' + 
+                (t.id === data.mainTimeline ? ' [MAIN]' : '') + 
+                parentInfo;
             timelineSelect.appendChild(option);
         });
     } else {
@@ -352,7 +370,7 @@ function drawGrid() {
     ctx.restore();
 }
 
-function renderInstance(instance, isSelected, checkHitXY = null) {
+function renderInstance(instance, isSelected, checkHitXY = null, parentFrame = 0) {
     let hitFound = false;
     const data = window.animationData;
     ctx.save();
@@ -365,11 +383,16 @@ function renderInstance(instance, isSelected, checkHitXY = null) {
     const targetId = instance.targetId;
 
     if (data.sprites[targetId]) {
-        // Render sub-sprite
-        const subFrame = data.sprites[targetId]["0"];
+        // Render sub-sprite with animation based on parent frame
+        // Calculate which frame of the nested sprite to show based on modulo
+        const nestedSprite = data.sprites[targetId];
+        const nestedFrameCount = Object.keys(nestedSprite).length;
+        // Use modulo to cycle through nested sprite frames based on parent frame
+        const nestedFrame = nestedFrameCount > 1 ? parentFrame % nestedFrameCount : 0;
+        const subFrame = nestedSprite[nestedFrame.toString()];
         if (subFrame) {
             subFrame.forEach(subInst => {
-                if (renderInstance(subInst, false, checkHitXY)) hitFound = true;
+                if (renderInstance(subInst, false, checkHitXY, nestedFrame)) hitFound = true;
             });
         }
     } 
@@ -387,6 +410,7 @@ function renderInstance(instance, isSelected, checkHitXY = null) {
             } 
             // Normal Render Logic
             else {
+                // Apply visual style based on selection
                 if (shapePart.type === 'fill') {
                     ctx.fillStyle = `rgba(${shapePart.color.join(',')})`;
                     ctx.fill("evenodd");
@@ -397,9 +421,23 @@ function renderInstance(instance, isSelected, checkHitXY = null) {
                 }
 
                 if (isSelected) {
+                    // Selected element: bright highlight
                     ctx.strokeStyle = "#00d2ff";
-                    ctx.lineWidth = 2 / t.scaleX; // counter-scale thickness
+                    ctx.lineWidth = 3 / t.scaleX;
                     ctx.stroke();
+                    
+                    // Draw selection handles
+                    ctx.fillStyle = "#00d2ff";
+                    ctx.globalAlpha = 0.3;
+                    ctx.fill("evenodd");
+                    ctx.globalAlpha = 1.0;
+                } else {
+                    // Non-selected elements: slightly more visible
+                    ctx.globalAlpha = 0.85;
+                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                    ctx.lineWidth = 1 / t.scaleX;
+                    ctx.stroke();
+                    ctx.globalAlpha = 1.0;
                 }
             }
         });
@@ -428,7 +466,7 @@ function draw() {
     const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
     if (frameData) {
         frameData.forEach((instance, index) => {
-            renderInstance(instance, index === selectedIndex);
+            renderInstance(instance, index === selectedIndex, null, currentFrame);
         });
     }
     
@@ -450,7 +488,7 @@ function getHitElement(mouseX, mouseY) {
         ctx.save();
         ctx.translate(viewportOffsetX, viewportOffsetY);
         ctx.scale(viewportScale, viewportScale);
-        let isHit = renderInstance(frameData[i], false, {x: mouseX, y: mouseY});
+        let isHit = renderInstance(frameData[i], false, {x: mouseX, y: mouseY}, currentFrame);
         ctx.restore();
         
         if (isHit) return i;
@@ -591,7 +629,13 @@ function updateLayerPanel() {
         const div = document.createElement("div");
         div.id = `layer-item-${index}`;
         div.className = "layer-item" + (index === selectedIndex ? " active" : "");
-        div.innerText = `Layer ${index}: ${instance.targetId}`;
+        
+        // Show if it's a sprite (nested animation) or shape
+        const isSprite = data.sprites[instance.targetId] ? " 🎬" : "";
+        const spriteInfo = data.sprites[instance.targetId] ? 
+            ` (${Object.keys(data.sprites[instance.targetId]).length}fr)` : "";
+        
+        div.innerText = `Layer ${index}: ${instance.targetId}${isSprite}${spriteInfo}`;
         div.onclick = () => selectLayer(index);
         layerList.appendChild(div);
     });
@@ -644,7 +688,8 @@ function applyPropertyChanges() {
     t.rotationDeg = parseFloat(pRot.value) || 0;
     
     draw();
-}[pX, pY, pScale, pRot].forEach(inp => {
+}
+[pX, pY, pScale, pRot].forEach(inp => {
     inp.addEventListener('input', applyPropertyChanges);
 });
 
@@ -676,14 +721,6 @@ playBtn.addEventListener('click', () => {
         clearInterval(playInterval);
     }
 });
-
-// Auto-load the imported JSON data
-window.animationData = animationData;
-console.log('Auto-loaded animation_data.json');
-initEditor();
-
-// Initialize
-resizeCanvas();
 </script>
 </body>
 </html>

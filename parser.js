@@ -139,10 +139,30 @@ function extractAnimationData(htmlContent) {
         data.mainTimeline = bestCandidate;
     }
     
-    // Build list of all timelines (sprites with multiple frames or containing sprite references)
+    // First pass: collect parent-child relationships
+    const spriteParents = {}; // spriteId -> array of parent sprite IDs
+    
+    for (const spriteId in data.sprites) {
+        const spriteFrames = data.sprites[spriteId];
+        for (const frameKey in spriteFrames) {
+            const frame = spriteFrames[frameKey];
+            for (const inst of frame) {
+                // If target is a sprite, record the parent relationship
+                if (data.sprites[inst.targetId]) {
+                    if (!spriteParents[inst.targetId]) {
+                        spriteParents[inst.targetId] = [];
+                    }
+                    if (!spriteParents[inst.targetId].includes(spriteId)) {
+                        spriteParents[inst.targetId].push(spriteId);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Second pass: create timelines using collected parent info
     for (const spriteId in data.sprites) {
         const frameCount = Object.keys(data.sprites[spriteId]).length;
-        // Include sprites with multiple frames OR containers with sprite references
         let isContainer = false;
         const spriteFrames = data.sprites[spriteId];
         for (const frameKey in spriteFrames) {
@@ -157,10 +177,12 @@ function extractAnimationData(htmlContent) {
         }
         
         if (frameCount > 1 || isContainer) {
+            const parents = spriteParents[spriteId] || [];
             data.timelines.push({
                 id: spriteId,
                 frames: frameCount,
-                isContainer: isContainer
+                isContainer: isContainer,
+                parents: parents
             });
         }
     }
