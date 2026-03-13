@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flash-to-Canvas Visual Editor</title>
+    <style>
+        :root {
+            --bg-color: #1e1e24;
+            --panel-bg: #2b2b36;
+            --text: #e0e0e0;
+            --accent: #00d2ff;
+        }
+        body {
+            margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color); color: var(--text);
+            display: flex; height: 100vh; overflow: hidden;
+        }
+        #viewport {
+            flex: 1; display: flex; flex-direction: column; background: #111;
+        }
+        #topbar {
+            background-color: var(--panel-bg); padding: 10px 20px;
+            border-bottom: 2px solid #1a1a20; display: flex; align-items: center; justify-content: space-between;
+        }
+        canvas {
+            flex: 1; 
+            background-color: #ffffff; 
+            background-image: 
+                linear-gradient(#f0f0f0 1px, transparent 1px),
+                linear-gradient(90deg, #f0f0f0 1px, transparent 1px);
+            background-size: 20px 20px;
+            cursor: crosshair; 
+            border-bottom: 2px solid var(--panel-bg);
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+        }
+        #timeline {
+            height: 60px; background-color: var(--panel-bg); display: flex; padding: 10px 20px;
+            align-items: center; gap: 15px;
+        }
+        #sidebar {
+            width: 320px; background-color: var(--panel-bg); border-left: 2px solid #1a1a20;
+            display: flex; flex-direction: column; z-index: 10;
+        }
+        .panel { padding: 15px; border-bottom: 2px solid #1a1a20; }
+        h3 { margin: 0 0 15px 0; font-size: 14px; text-transform: uppercase; color: #888; letter-spacing: 1px; display: flex; justify-content: space-between; align-items: center;}
+        
+        .layer-item {
+            padding: 8px; background: #3a3a46; margin-bottom: 5px; cursor: pointer; border-radius: 4px;
+            border-left: 3px solid transparent; transition: 0.1s;
+        }
+        .layer-item:hover { background: #454555; }
+        .layer-item.active { background: #454555; border-left: 3px solid var(--accent); font-weight: bold; }
+        
+        .prop-group { display: flex; align-items: center; margin-bottom: 10px; }
+        .prop-group label { width: 50px; font-size: 13px; color: #aaa;}
+        .prop-group input {
+            flex: 1; background: #1e1e24; border: 1px solid #444; color: white;
+            padding: 6px; border-radius: 4px;
+        }
+        .prop-group input:focus { outline: none; border-color: var(--accent); }
+        
+        button {
+            background: var(--accent); border: none; padding: 8px 15px; border-radius: 4px;
+            color: #000; font-weight: bold; cursor: pointer; transition: 0.1s;
+        }
+        button:hover { background: #00e5ff; transform: scale(1.05); }
+        button.small { padding: 4px 8px; font-size: 11px; background: #444; color: #fff;}
+        button.small:hover { background: #666; }
+        
+        input[type=range] { flex: 1; cursor: pointer; }
+        input[type=file] { color: white; }
+    </style>
+</head>
+<body>
+
+    <div id="viewport">
+        <!-- Top Bar for File Upload -->
+        <div id="topbar">
+            <div>
+                <label style="margin-right: 10px; font-weight: bold;">1. Load JSON:</label>
+                <input type="file" id="fileInput" accept=".json" />
+            </div>
+            <button id="exportBtn" style="background: #4caf50; color: white;">2. Export Edited JSON</button>
+        </div>
+
+        <!-- Render Canvas -->
+        <canvas id="renderCanvas" width="800" height="600"></canvas>
+        
+        <!-- Timeline Controls -->
+        <div id="timeline">
+            <select id="timelineSelect" style="background:#444;color:white;padding:4px;border-radius:4px;border:1px solid #666;margin-right:10px;"></select>
+            <button id="playBtn" disabled>Play</button>
+            <span id="frameCounter" style="width: 80px; font-size: 14px;">Frame: 0</span>
+            <input type="range" id="frameSlider" min="0" max="0" value="0" disabled>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <!-- Layers / Elements in current frame -->
+        <div class="panel" style="flex: 1; overflow-y: auto;">
+            <h3>
+                Layers (Frame <span id="layerFrameLabel">0</span>)
+                <button class="small" id="resetViewBtn">Reset View</button>
+            </h3>
+            <div id="layerList"></div>
+        </div>
+
+        <!-- Properties Editor -->
+        <div class="panel">
+            <h3>Properties</h3>
+            <div id="propertiesPanel" style="display: none;">
+                <div class="prop-group">
+                    <label>ID:</label>
+                    <span id="propId" style="color: var(--accent); font-weight: bold;">-</span>
+                </div>
+                <div class="prop-group">
+                    <label>X:</label>
+                    <input type="number" id="propX" step="1">
+                </div>
+                <div class="prop-group">
+                    <label>Y:</label>
+                    <input type="number" id="propY" step="1">
+                </div>
+                <div class="prop-group">
+                    <label>Scale:</label>
+                    <input type="number" id="propScale" step="0.01">
+                </div>
+                <div class="prop-group">
+                    <label>Rot:</label>
+                    <input type="number" id="propRot" step="1">
+                </div>
+            </div>
+            <div id="noSelectionMsg" style="color: #666; font-size: 13px;">Select a layer or click a shape on the canvas to edit.</div>
+        </div>
+    </div>
+
+<script type="module">
+import animationData from './animation_data.json';
+
+/**
+ * EDITOR LOGIC & STATE
+ */
+let TOTAL_FRAMES = 0;
+let currentFrame = 0;
+let isPlaying = false;
+let playInterval;
+let selectedIndex = -1;
+
+// Viewport / Camera State
+let viewportScale = 1.0;
+let viewportOffsetX = 200;
+let viewportOffsetY = 100;
+
+// Mouse Interaction State
+let isDraggingElement = false;
+let isPanningCanvas = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let initialElemX = 0;
+let initialElemY = 0;
+let initialPanX = 0;
+let initialPanY = 0;
+
+// DOM Elements
+const canvas = document.getElementById("renderCanvas");
+const ctx = canvas.getContext("2d");
+const slider = document.getElementById("frameSlider");
+const frameCounter = document.getElementById("frameCounter");
+const playBtn = document.getElementById("playBtn");
+const timelineSelect = document.getElementById("timelineSelect");
+const layerList = document.getElementById("layerList");
+const layerFrameLabel = document.getElementById("layerFrameLabel");
+const resetViewBtn = document.getElementById("resetViewBtn");
+const fileInput = document.getElementById("fileInput");
+const exportBtn = document.getElementById("exportBtn");
+
+// Property inputs
+const propPanel = document.getElementById("propertiesPanel");
+const noSelMsg = document.getElementById("noSelectionMsg");
+const pId = document.getElementById("propId");
+const pX = document.getElementById("propX");
+const pY = document.getElementById("propY");
+const pScale = document.getElementById("propScale");
+const pRot = document.getElementById("propRot");
+
+// Resize canvas to fill area
+function resizeCanvas() {
+    canvas.width = canvas.parentElement.clientWidth;
+    canvas.height = canvas.parentElement.clientHeight - 60 - 55; // minus topbar and timeline
+    draw();
+}
+window.addEventListener('resize', resizeCanvas);
+
+/**
+ * DATA LOADING & EXPORTING
+ */
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            window.animationData = JSON.parse(event.target.result);
+            initEditor();
+        } catch (err) {
+            alert("Error parsing JSON file. Make sure it is the file generated by the Node.js script.");
+            console.error(err);
+        }
+    };
+    reader.readAsText(file);
+});
+
+exportBtn.addEventListener('click', () => {
+    if (!window.animationData) {
+        alert("Load a file first before exporting.");
+        return;
+    }
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(window.animationData));
+    const dlAnchorElem = document.createElement('a');
+    dlAnchorElem.setAttribute("href",     dataStr);
+    dlAnchorElem.setAttribute("download", "edited_animation_data.json");
+    dlAnchorElem.click();
+});
+
+function initEditor() {
+    const data = window.animationData;
+    if (!data || !data.sprites) return;
+    
+    // Populate timeline dropdown
+    timelineSelect.innerHTML = '';
+    if (data.timelines && data.timelines.length > 0) {
+        data.timelines.forEach(t => {
+            const option = document.createElement('option');
+            option.value = t.id;
+            option.textContent = t.id + ' (' + t.frames + ' frames)' + (t.id === data.mainTimeline ? ' [MAIN]' : '');
+            timelineSelect.appendChild(option);
+        });
+    } else {
+        // Fallback: auto-detect if no timelines array
+        let mainTimeline = data.mainTimeline;
+        if (!mainTimeline) {
+            let maxFrames = 0;
+            for (const spriteName in data.sprites) {
+                const frameCount = Object.keys(data.sprites[spriteName]).length;
+                if (frameCount > maxFrames) {
+                    maxFrames = frameCount;
+                    mainTimeline = spriteName;
+                }
+            }
+            console.log('Detected mainTimeline:', mainTimeline);
+        }
+        const option = document.createElement('option');
+        option.value = mainTimeline;
+        option.textContent = mainTimeline + ' (auto-detected)';
+        timelineSelect.appendChild(option);
+    }
+    
+    // Select main timeline by default
+    timelineSelect.value = data.mainTimeline;
+    
+    updateTimeline();
+}
+
+function updateTimeline() {
+    const data = window.animationData;
+    const timelineId = timelineSelect.value;
+    
+    TOTAL_FRAMES = Object.keys(data.sprites[timelineId]).length;
+    slider.max = TOTAL_FRAMES - 1;
+    slider.disabled = false;
+    playBtn.disabled = false;
+    
+    currentFrame = 0;
+    slider.value = 0;
+    selectedIndex = -1;
+    
+    frameCounter.innerText = `Frame: 0`;
+    layerFrameLabel.innerText = "0";
+    
+    draw();
+}
+
+// Timeline selection handler
+timelineSelect.addEventListener('change', () => {
+    updateTimeline();
+});
+
+/**
+ * DRAWING SVG PATHS (Highly Robust version)
+ */
+function drawSVGPath(context, pathStr) {
+    const parts = pathStr.trim().split(/\s+/);
+    let drawCommand = "";
+    
+    for (let i = 0; i < parts.length; i++) {
+        let token = parts[i];
+        if (!token) continue;
+        
+        if (token === 'L' || token === 'M' || token === 'Q' || token === 'Z') {
+            drawCommand = token;
+            if (token === 'Z') context.closePath();
+        } else {
+            let p1 = parseFloat(token);
+            switch (drawCommand) {
+                case 'M':
+                    context.moveTo(p1, parseFloat(parts[++i]));
+                    break;
+                case 'L':
+                    context.lineTo(p1, parseFloat(parts[++i]));
+                    break;
+                case 'Q':
+                    context.quadraticCurveTo(
+                        p1, parseFloat(parts[++i]),
+                        parseFloat(parts[++i]), parseFloat(parts[++i])
+                    );
+                    break;
+            }
+        }
+    }
+}
+
+/**
+ * RENDERING
+ */
+function drawGrid() {
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,0.05)";
+    ctx.lineWidth = 1;
+    const gridSize = 20 * viewportScale;
+    
+    const startX = viewportOffsetX % gridSize;
+    const startY = viewportOffsetY % gridSize;
+    
+    ctx.beginPath();
+    for (let x = startX; x < canvas.width; x += gridSize) {
+        ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height);
+    }
+    for (let y = startY; y < canvas.height; y += gridSize) {
+        ctx.moveTo(0, y); ctx.lineTo(canvas.width, y);
+    }
+    ctx.stroke();
+
+    // Draw main axes
+    ctx.strokeStyle = "rgba(0,0,0,0.2)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(viewportOffsetX, 0); ctx.lineTo(viewportOffsetX, canvas.height);
+    ctx.moveTo(0, viewportOffsetY); ctx.lineTo(canvas.width, viewportOffsetY);
+    ctx.stroke();
+    ctx.restore();
+}
+
+function renderInstance(instance, isSelected, checkHitXY = null) {
+    let hitFound = false;
+    const data = window.animationData;
+    ctx.save();
+    
+    const t = instance.transform;
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.rotationDeg * Math.PI / 180);
+    ctx.scale(t.scaleX, t.scaleY);
+
+    const targetId = instance.targetId;
+
+    if (data.sprites[targetId]) {
+        // Render sub-sprite
+        const subFrame = data.sprites[targetId]["0"];
+        if (subFrame) {
+            subFrame.forEach(subInst => {
+                if (renderInstance(subInst, false, checkHitXY)) hitFound = true;
+            });
+        }
+    } 
+    else if (data.shapes[targetId]) {
+        // Render Shape
+        data.shapes[targetId].forEach(shapePart => {
+            ctx.beginPath();
+            drawSVGPath(ctx, shapePart.pathData);
+            
+            // Hit Test Logic
+            if (checkHitXY) {
+                if (ctx.isPointInPath(checkHitXY.x, checkHitXY.y)) {
+                    hitFound = true;
+                }
+            } 
+            // Normal Render Logic
+            else {
+                if (shapePart.type === 'fill') {
+                    ctx.fillStyle = `rgba(${shapePart.color.join(',')})`;
+                    ctx.fill("evenodd");
+                } else {
+                    ctx.strokeStyle = `rgba(${shapePart.color.join(',')})`;
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+
+                if (isSelected) {
+                    ctx.strokeStyle = "#00d2ff";
+                    ctx.lineWidth = 2 / t.scaleX; // counter-scale thickness
+                    ctx.stroke();
+                }
+            }
+        });
+    }
+    
+    ctx.restore();
+    return hitFound;
+}
+
+function draw() {
+    const data = window.animationData;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawGrid();
+
+    if (!data) {
+        ctx.fillStyle = "#888";
+        ctx.font = "20px Arial";
+        ctx.fillText("Please Load 'animation_data.json' using the button above.", 50, 50);
+        return;
+    }
+    
+    ctx.save();
+    ctx.translate(viewportOffsetX, viewportOffsetY);
+    ctx.scale(viewportScale, viewportScale);
+    
+    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+    if (frameData) {
+        frameData.forEach((instance, index) => {
+            renderInstance(instance, index === selectedIndex);
+        });
+    }
+    
+    ctx.restore();
+    updateLayerPanel();
+}
+
+/**
+ * INTERACTION: HIT TESTING
+ */
+function getHitElement(mouseX, mouseY) {
+    const data = window.animationData;
+    if(!data) return -1;
+    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+    if (!frameData) return -1;
+    
+    // Reverse loop to select top-most element first
+    for (let i = frameData.length - 1; i >= 0; i--) {
+        ctx.save();
+        ctx.translate(viewportOffsetX, viewportOffsetY);
+        ctx.scale(viewportScale, viewportScale);
+        let isHit = renderInstance(frameData[i], false, {x: mouseX, y: mouseY});
+        ctx.restore();
+        
+        if (isHit) return i;
+    }
+    return -1;
+}
+
+/**
+ * MOUSE EVENTS (Pan, Drag, Zoom, Hover)
+ */
+canvas.addEventListener('wheel', (e) => {
+    const data = window.animationData;
+    if(!data) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    const zoomIntensity = 0.1;
+    const wheel = e.deltaY < 0 ? 1 : -1;
+    const zoomFactor = Math.exp(wheel * zoomIntensity);
+
+    viewportOffsetX = mouseX - (mouseX - viewportOffsetX) * zoomFactor;
+    viewportOffsetY = mouseY - (mouseY - viewportOffsetY) * zoomFactor;
+    viewportScale *= zoomFactor;
+
+    draw();
+});
+
+canvas.addEventListener('mousedown', (e) => {
+    const data = window.animationData;
+    if(!data) return;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Middle click OR clicked on empty space = PAN
+    if (e.button === 1) { 
+        e.preventDefault();
+        startPan(mouseX, mouseY);
+        return;
+    }
+
+    // Left click
+    if (e.button === 0) {
+        const hitIndex = getHitElement(mouseX, mouseY);
+        
+        if (hitIndex !== -1) {
+            // Start Element Drag
+            selectLayer(hitIndex);
+            isDraggingElement = true;
+            dragStartX = mouseX;
+            dragStartY = mouseY;
+            
+            const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+            initialElemX = frameData[selectedIndex].transform.x;
+            initialElemY = frameData[selectedIndex].transform.y;
+            canvas.style.cursor = 'move';
+        } else {
+            // Clicked empty space: deselect & start pan
+            selectLayer(-1);
+            startPan(mouseX, mouseY);
+        }
+    }
+});
+
+function startPan(mouseX, mouseY) {
+    isPanningCanvas = true;
+    dragStartX = mouseX;
+    dragStartY = mouseY;
+    initialPanX = viewportOffsetX;
+    initialPanY = viewportOffsetY;
+    canvas.style.cursor = 'grabbing';
+}
+
+canvas.addEventListener('mousemove', (e) => {
+    const data = window.animationData;
+    if(!data) return;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    if (isDraggingElement && selectedIndex !== -1) {
+        const dx = (mouseX - dragStartX) / viewportScale;
+        const dy = (mouseY - dragStartY) / viewportScale;
+        
+        const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+        const t = frameData[selectedIndex].transform;
+        
+        t.x = initialElemX + dx;
+        t.y = initialElemY + dy;
+        
+        pX.value = parseFloat(t.x.toFixed(2));
+        pY.value = parseFloat(t.y.toFixed(2));
+        draw();
+    } 
+    else if (isPanningCanvas) {
+        const dx = mouseX - dragStartX;
+        const dy = mouseY - dragStartY;
+        viewportOffsetX = initialPanX + dx;
+        viewportOffsetY = initialPanY + dy;
+        draw();
+    } 
+    else {
+        // Change cursor on hover
+        const hitIndex = getHitElement(mouseX, mouseY);
+        canvas.style.cursor = (hitIndex !== -1) ? 'move' : 'crosshair';
+    }
+});
+
+window.addEventListener('mouseup', () => {
+    isDraggingElement = false;
+    isPanningCanvas = false;
+    if(window.animationData) canvas.style.cursor = 'crosshair';
+});
+
+resetViewBtn.addEventListener('click', () => {
+    viewportScale = 1.0;
+    viewportOffsetX = 200;
+    viewportOffsetY = 100;
+    draw();
+});
+
+/**
+ * UI PANELS & TIMELINE
+ */
+function updateLayerPanel() {
+    const data = window.animationData;
+    layerFrameLabel.innerText = currentFrame;
+    layerList.innerHTML = "";
+    
+    if(!data) return;
+
+    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+    if (!frameData) return;
+
+    frameData.forEach((instance, index) => {
+        const div = document.createElement("div");
+        div.id = `layer-item-${index}`;
+        div.className = "layer-item" + (index === selectedIndex ? " active" : "");
+        div.innerText = `Layer ${index}: ${instance.targetId}`;
+        div.onclick = () => selectLayer(index);
+        layerList.appendChild(div);
+    });
+}
+
+function selectLayer(index) {
+    selectedIndex = index;
+    
+    document.querySelectorAll('.layer-item').forEach(el => el.classList.remove('active'));
+    if(index !== -1) {
+        const el = document.getElementById(`layer-item-${index}`);
+        if(el) el.classList.add('active');
+    }
+    
+    populateProperties();
+    draw();
+}
+
+function populateProperties() {
+    const data = window.animationData;
+    if (selectedIndex === -1) {
+        propPanel.style.display = "none";
+        noSelMsg.style.display = "block";
+        return;
+    }
+    
+    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+    const instance = frameData[selectedIndex];
+    
+    propPanel.style.display = "block";
+    noSelMsg.style.display = "none";
+    
+    pId.innerText = instance.targetId;
+    pX.value = parseFloat(instance.transform.x.toFixed(2));
+    pY.value = parseFloat(instance.transform.y.toFixed(2));
+    pScale.value = parseFloat(instance.transform.scaleX.toFixed(3)); 
+    pRot.value = parseFloat(instance.transform.rotationDeg.toFixed(2));
+}
+
+function applyPropertyChanges() {
+    const data = window.animationData;
+    if (selectedIndex === -1) return;
+    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+    const t = frameData[selectedIndex].transform;
+    
+    t.x = parseFloat(pX.value) || 0;
+    t.y = parseFloat(pY.value) || 0;
+    t.scaleX = parseFloat(pScale.value) || 1;
+    t.scaleY = parseFloat(pScale.value) || 1;
+    t.rotationDeg = parseFloat(pRot.value) || 0;
+    
+    draw();
+}[pX, pY, pScale, pRot].forEach(inp => {
+    inp.addEventListener('input', applyPropertyChanges);
+});
+
+// Timeline Controls
+slider.addEventListener('input', (e) => {
+    const data = window.animationData;
+    if(!data) return;
+    currentFrame = parseInt(e.target.value, 10);
+    frameCounter.innerText = `Frame: ${currentFrame}`;
+    selectLayer(-1);
+    draw();
+});
+
+playBtn.addEventListener('click', () => {
+    const data = window.animationData;
+    if(!data) return;
+    isPlaying = !isPlaying;
+    playBtn.innerText = isPlaying ? "Pause" : "Play";
+    
+    if (isPlaying) {
+        playInterval = setInterval(() => {
+            currentFrame = (currentFrame + 1) % TOTAL_FRAMES;
+            slider.value = currentFrame;
+            frameCounter.innerText = `Frame: ${currentFrame}`;
+            // Intentionally not deselecting so user can tweak parameters while playing
+            draw();
+        }, 1000 / 30); // Play at ~30 FPS
+    } else {
+        clearInterval(playInterval);
+    }
+});
+
+// Auto-load the imported JSON data
+window.animationData = animationData;
+console.log('Auto-loaded animation_data.json');
+initEditor();
+
+// Initialize
+resizeCanvas();
+</script>
+</body>
+</html>
