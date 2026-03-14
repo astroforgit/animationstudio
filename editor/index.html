@@ -59,6 +59,15 @@
             padding: 6px; border-radius: 4px;
         }
         .prop-group input:focus { outline: none; border-color: var(--accent); }
+        .prop-group input[readonly] { opacity: 0.7; }
+        .prop-delta-wrap {
+            display: none; align-items: center; gap: 6px; margin-left: 8px; flex: 1;
+        }
+        .prop-delta-wrap.visible { display: flex; }
+        .prop-delta-wrap span { color: #aaa; font-weight: bold; }
+        .prop-toggle { margin-bottom: 12px; font-size: 13px; color: #aaa; }
+        .prop-toggle label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+        .prop-toggle input { cursor: pointer; }
         
         button {
             background: var(--accent); border: none; padding: 8px 15px; border-radius: 4px;
@@ -113,6 +122,12 @@
         <div class="panel">
             <h3>Properties</h3>
             <div id="propertiesPanel" style="display: none;">
+                <div class="prop-toggle">
+                    <label>
+                        <input type="checkbox" id="applyAllFramesToggle">
+                        Apply to all frames
+                    </label>
+                </div>
                 <div class="prop-group">
                     <label>ID:</label>
                     <span id="propId" style="color: var(--accent); font-weight: bold;">-</span>
@@ -120,18 +135,34 @@
                 <div class="prop-group">
                     <label>X:</label>
                     <input type="number" id="propX" step="1">
+                    <div class="prop-delta-wrap" id="propXDeltaWrap">
+                        <span>+</span>
+                        <input type="number" id="propXDelta" step="1" value="0">
+                    </div>
                 </div>
                 <div class="prop-group">
                     <label>Y:</label>
                     <input type="number" id="propY" step="1">
+                    <div class="prop-delta-wrap" id="propYDeltaWrap">
+                        <span>+</span>
+                        <input type="number" id="propYDelta" step="1" value="0">
+                    </div>
                 </div>
                 <div class="prop-group">
                     <label>Scale:</label>
                     <input type="number" id="propScale" step="0.01">
+                    <div class="prop-delta-wrap" id="propScaleDeltaWrap">
+                        <span>+</span>
+                        <input type="number" id="propScaleDelta" step="0.01" value="0">
+                    </div>
                 </div>
                 <div class="prop-group">
                     <label>Rot:</label>
                     <input type="number" id="propRot" step="1">
+                    <div class="prop-delta-wrap" id="propRotDeltaWrap">
+                        <span>+</span>
+                        <input type="number" id="propRotDelta" step="1" value="0">
+                    </div>
                 </div>
             </div>
             <div id="noSelectionMsg" style="color: #666; font-size: 13px;">Select a layer or click a shape on the canvas to edit.</div>
@@ -163,6 +194,7 @@ let isPlaying = false;
 let playInterval;
 let selectedIndex = -1;
 let contextOpacity = 0.18;
+let applyToAllFrames = false;
 
 // Viewport / Camera State
 let viewportScale = 1.0;
@@ -178,6 +210,14 @@ let initialElemX = 0;
 let initialElemY = 0;
 let initialPanX = 0;
 let initialPanY = 0;
+let dragStartAllFramesDeltaX = 0;
+let dragStartAllFramesDeltaY = 0;
+let allFramesDisplayDelta = {
+    x: 0,
+    y: 0,
+    scale: 0,
+    rotationDeg: 0
+};
 
 // DOM Elements
 const canvas = document.getElementById("renderCanvas");
@@ -197,11 +237,20 @@ const exportBtn = document.getElementById("exportBtn");
 // Property inputs
 const propPanel = document.getElementById("propertiesPanel");
 const noSelMsg = document.getElementById("noSelectionMsg");
+const applyAllFramesToggle = document.getElementById("applyAllFramesToggle");
 const pId = document.getElementById("propId");
 const pX = document.getElementById("propX");
 const pY = document.getElementById("propY");
 const pScale = document.getElementById("propScale");
 const pRot = document.getElementById("propRot");
+const pXDelta = document.getElementById("propXDelta");
+const pYDelta = document.getElementById("propYDelta");
+const pScaleDelta = document.getElementById("propScaleDelta");
+const pRotDelta = document.getElementById("propRotDelta");
+const pXDeltaWrap = document.getElementById("propXDeltaWrap");
+const pYDeltaWrap = document.getElementById("propYDeltaWrap");
+const pScaleDeltaWrap = document.getElementById("propScaleDeltaWrap");
+const pRotDeltaWrap = document.getElementById("propRotDeltaWrap");
 
 // Resize canvas to fill area
 function resizeCanvas() {
@@ -299,6 +348,7 @@ function updateTimeline() {
     currentFrame = 0;
     slider.value = 0;
     selectedIndex = -1;
+    resetAllFramesDeltaInputs();
     
     frameCounter.innerText = `Frame: 0`;
     layerFrameLabel.innerText = "0";
@@ -321,6 +371,97 @@ function getSelectedInstance() {
     const frameData = getActiveFrameData();
     if (!frameData || selectedIndex < 0 || selectedIndex >= frameData.length) return null;
     return frameData[selectedIndex];
+}
+
+function resetAllFramesDeltaInputs() {
+    allFramesDisplayDelta = {
+        x: 0,
+        y: 0,
+        scale: 0,
+        rotationDeg: 0
+    };
+    syncAllFramesDeltaInputs();
+}
+
+function syncAllFramesDeltaInputs() {
+    pXDelta.value = allFramesDisplayDelta.x.toFixed(2);
+    pYDelta.value = allFramesDisplayDelta.y.toFixed(2);
+    pScaleDelta.value = allFramesDisplayDelta.scale.toFixed(3);
+    pRotDelta.value = allFramesDisplayDelta.rotationDeg.toFixed(2);
+}
+
+function updateApplyAllFramesUI() {
+    const deltaWraps = [pXDeltaWrap, pYDeltaWrap, pScaleDeltaWrap, pRotDeltaWrap];
+    const baseInputs = [pX, pY, pScale, pRot];
+
+    applyAllFramesToggle.checked = applyToAllFrames;
+    deltaWraps.forEach(wrap => wrap.classList.toggle('visible', applyToAllFrames));
+    baseInputs.forEach(input => {
+        input.readOnly = applyToAllFrames;
+    });
+    syncAllFramesDeltaInputs();
+}
+
+function forEachMatchingInstanceAcrossFrames(callback) {
+    const data = window.animationData;
+    const timelineId = timelineSelect.value;
+    const selectedInstance = getSelectedInstance();
+    if (!data || !timelineId || !selectedInstance || selectedIndex < 0) return;
+
+    const selectedTargetId = selectedInstance.targetId;
+    const timelineFrames = data.sprites[timelineId];
+
+    Object.keys(timelineFrames).forEach(frameKey => {
+        const frameData = timelineFrames[frameKey];
+        if (!frameData || selectedIndex >= frameData.length) return;
+
+        const instance = frameData[selectedIndex];
+        if (!instance || instance.targetId !== selectedTargetId) return;
+
+        callback(instance, parseInt(frameKey, 10));
+    });
+}
+
+function applyDeltaToAllFrames(propertyName, deltaValue) {
+    if (!Number.isFinite(deltaValue) || deltaValue === 0) return;
+
+    forEachMatchingInstanceAcrossFrames(instance => {
+        const t = instance.transform;
+
+        if (propertyName === 'x') {
+            t.x += deltaValue;
+        } else if (propertyName === 'y') {
+            t.y += deltaValue;
+        } else if (propertyName === 'scale') {
+            t.scaleX += deltaValue;
+            t.scaleY += deltaValue;
+        } else if (propertyName === 'rotationDeg') {
+            t.rotationDeg += deltaValue;
+        }
+    });
+}
+
+function getAllFramesDisplayDeltaValue(propertyName) {
+    return allFramesDisplayDelta[propertyName] || 0;
+}
+
+function setAllFramesDisplayDeltaValue(propertyName, totalDeltaValue) {
+    const normalizedTotal = Number.isFinite(totalDeltaValue) ? totalDeltaValue : 0;
+    const currentTotal = getAllFramesDisplayDeltaValue(propertyName);
+    const diff = normalizedTotal - currentTotal;
+
+    if (diff !== 0) {
+        applyDeltaToAllFrames(propertyName, diff);
+        allFramesDisplayDelta[propertyName] = normalizedTotal;
+    }
+
+    syncAllFramesDeltaInputs();
+}
+
+function applyAllFramesDelta(input, propertyName) {
+    const totalDeltaValue = parseFloat(input.value);
+    setAllFramesDisplayDeltaValue(propertyName, totalDeltaValue);
+    draw();
 }
 
 // Timeline selection handler
@@ -533,23 +674,30 @@ function getContextRenderState(selectedTimelineId, selectedFrame) {
     return bestCandidate;
 }
 
-function renderTimelineFrame(timelineId, frameNumber, highlightedIndex = -1) {
+function renderTimelineFrame(timelineId, frameNumber, highlightedIndex = -1, fadedOtherOpacity = null) {
     const frameData = getTimelineFrameData(timelineId, frameNumber);
     if (!frameData) return;
 
     frameData.forEach((instance, index) => {
+        ctx.save();
+
+        if (highlightedIndex !== -1 && index !== highlightedIndex && Number.isFinite(fadedOtherOpacity)) {
+            ctx.globalAlpha *= fadedOtherOpacity;
+        }
+
         renderInstance(instance, index === highlightedIndex, null, frameNumber);
+        ctx.restore();
     });
 }
 
-function renderEditedTimelineInContext(contextState) {
+function renderEditedTimelineInContext(contextState, fadedOtherOpacity = null) {
     ctx.save();
 
     contextState.path.forEach(step => {
         applyInstanceTransform(step.instance);
     });
 
-    renderTimelineFrame(timelineSelect.value, currentFrame, selectedIndex);
+    renderTimelineFrame(timelineSelect.value, currentFrame, selectedIndex, fadedOtherOpacity);
     ctx.restore();
 }
 
@@ -645,6 +793,7 @@ function draw() {
 
     const activeTimelineId = timelineSelect.value;
     const contextState = getContextRenderState(activeTimelineId, currentFrame);
+    const fadeOtherLayers = selectedIndex !== -1 ? contextOpacity : null;
 
     if (contextState) {
         ctx.save();
@@ -652,9 +801,9 @@ function draw() {
         renderTimelineFrame(data.mainTimeline, contextState.mainFrame, -1);
         ctx.restore();
 
-        renderEditedTimelineInContext(contextState);
+        renderEditedTimelineInContext(contextState, fadeOtherLayers);
     } else {
-        renderTimelineFrame(activeTimelineId, currentFrame, selectedIndex);
+        renderTimelineFrame(activeTimelineId, currentFrame, selectedIndex, fadeOtherLayers);
     }
     
     ctx.restore();
@@ -754,6 +903,8 @@ canvas.addEventListener('mousedown', (e) => {
 
             initialElemX = instance.transform.x;
             initialElemY = instance.transform.y;
+        dragStartAllFramesDeltaX = getAllFramesDisplayDeltaValue('x');
+        dragStartAllFramesDeltaY = getAllFramesDisplayDeltaValue('y');
             canvas.style.cursor = 'move';
         } else {
             // Clicked empty space: deselect & start pan
@@ -788,13 +939,19 @@ canvas.addEventListener('mousemove', (e) => {
             isDraggingElement = false;
             return;
         }
-        const t = instance.transform;
-        
-        t.x = initialElemX + dx;
-        t.y = initialElemY + dy;
-        
-        pX.value = parseFloat(t.x.toFixed(2));
-        pY.value = parseFloat(t.y.toFixed(2));
+
+        if (applyToAllFrames) {
+            setAllFramesDisplayDeltaValue('x', dragStartAllFramesDeltaX + dx);
+            setAllFramesDisplayDeltaValue('y', dragStartAllFramesDeltaY + dy);
+        } else {
+            const t = instance.transform;
+            t.x = initialElemX + dx;
+            t.y = initialElemY + dy;
+            
+            pX.value = parseFloat(t.x.toFixed(2));
+            pY.value = parseFloat(t.y.toFixed(2));
+        }
+
         draw();
     } 
     else if (isPanningCanvas) {
@@ -859,7 +1016,12 @@ function updateLayerPanel() {
 }
 
 function selectLayer(index) {
+    const selectionChanged = index !== selectedIndex;
     selectedIndex = index;
+
+    if (selectionChanged) {
+        resetAllFramesDeltaInputs();
+    }
     
     document.querySelectorAll('.layer-item').forEach(el => el.classList.remove('active'));
     if(index !== -1) {
@@ -874,6 +1036,8 @@ function populateProperties() {
     const data = window.animationData;
     const instance = getSelectedInstance();
 
+    updateApplyAllFramesUI();
+
     if (!data || !instance) {
         propPanel.style.display = "none";
         noSelMsg.style.display = "block";
@@ -882,15 +1046,22 @@ function populateProperties() {
     
     propPanel.style.display = "block";
     noSelMsg.style.display = "none";
-    
+
+    const displayX = applyToAllFrames ? instance.transform.x - getAllFramesDisplayDeltaValue('x') : instance.transform.x;
+    const displayY = applyToAllFrames ? instance.transform.y - getAllFramesDisplayDeltaValue('y') : instance.transform.y;
+    const displayScale = applyToAllFrames ? instance.transform.scaleX - getAllFramesDisplayDeltaValue('scale') : instance.transform.scaleX;
+    const displayRot = applyToAllFrames ? instance.transform.rotationDeg - getAllFramesDisplayDeltaValue('rotationDeg') : instance.transform.rotationDeg;
+
     pId.innerText = instance.targetId;
-    pX.value = parseFloat(instance.transform.x.toFixed(2));
-    pY.value = parseFloat(instance.transform.y.toFixed(2));
-    pScale.value = parseFloat(instance.transform.scaleX.toFixed(3)); 
-    pRot.value = parseFloat(instance.transform.rotationDeg.toFixed(2));
+    pX.value = parseFloat(displayX.toFixed(2));
+    pY.value = parseFloat(displayY.toFixed(2));
+    pScale.value = parseFloat(displayScale.toFixed(3)); 
+    pRot.value = parseFloat(displayRot.toFixed(2));
 }
 
 function applyPropertyChanges() {
+    if (applyToAllFrames) return;
+
     const instance = getSelectedInstance();
     if (!instance) return;
     const t = instance.transform;
@@ -905,6 +1076,27 @@ function applyPropertyChanges() {
 }
 [pX, pY, pScale, pRot].forEach(inp => {
     inp.addEventListener('input', applyPropertyChanges);
+});
+
+applyAllFramesToggle.addEventListener('change', (e) => {
+    applyToAllFrames = e.target.checked;
+    resetAllFramesDeltaInputs();
+    updateApplyAllFramesUI();
+    populateProperties();
+});
+
+[
+    [pXDelta, 'x'],
+    [pYDelta, 'y'],
+    [pScaleDelta, 'scale'],
+    [pRotDelta, 'rotationDeg']
+].forEach(([input, propertyName]) => {
+    input.addEventListener('change', () => applyAllFramesDelta(input, propertyName));
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            applyAllFramesDelta(input, propertyName);
+        }
+    });
 });
 
 contextOpacitySlider.addEventListener('input', (e) => {
