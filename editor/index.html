@@ -93,6 +93,9 @@
             <button id="playBtn" disabled>Play</button>
             <span id="frameCounter" style="width: 80px; font-size: 14px;">Frame: 0</span>
             <input type="range" id="frameSlider" min="0" max="0" value="0" disabled>
+            <label for="contextOpacitySlider" style="font-size: 13px; color: #aaa;">Other opacity</label>
+            <input type="range" id="contextOpacitySlider" min="0" max="100" value="18">
+            <span id="contextOpacityValue" style="width: 42px; font-size: 13px; text-align: right;">18%</span>
         </div>
     </div>
 
@@ -159,6 +162,7 @@ let currentFrame = 0;
 let isPlaying = false;
 let playInterval;
 let selectedIndex = -1;
+let contextOpacity = 0.18;
 
 // Viewport / Camera State
 let viewportScale = 1.0;
@@ -182,6 +186,8 @@ const slider = document.getElementById("frameSlider");
 const frameCounter = document.getElementById("frameCounter");
 const playBtn = document.getElementById("playBtn");
 const timelineSelect = document.getElementById("timelineSelect");
+const contextOpacitySlider = document.getElementById("contextOpacitySlider");
+const contextOpacityValue = document.getElementById("contextOpacityValue");
 const layerList = document.getElementById("layerList");
 const layerFrameLabel = document.getElementById("layerFrameLabel");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -300,6 +306,23 @@ function updateTimeline() {
     draw();
 }
 
+function getActiveFrameData() {
+    return getTimelineFrameData(timelineSelect.value, currentFrame);
+}
+
+function syncSelectionForCurrentFrame() {
+    const frameData = getActiveFrameData();
+    if (!frameData || selectedIndex < 0 || selectedIndex >= frameData.length) {
+        selectedIndex = -1;
+    }
+}
+
+function getSelectedInstance() {
+    const frameData = getActiveFrameData();
+    if (!frameData || selectedIndex < 0 || selectedIndex >= frameData.length) return null;
+    return frameData[selectedIndex];
+}
+
 // Timeline selection handler
 timelineSelect.addEventListener('change', () => {
     updateTimeline();
@@ -370,25 +393,179 @@ function drawGrid() {
     ctx.restore();
 }
 
-function renderInstance(instance, isSelected, checkHitXY = null, parentFrame = 0) {
-    let hitFound = false;
-    const data = window.animationData;
-    ctx.save();
-    
+function resolveNestedFrame(instance, nestedSprite, parentFrame) {
+    const nestedFrameCount = Object.keys(nestedSprite).length;
+
+    if (Number.isFinite(instance.nestedFrameOffset)) {
+        let resolvedFrame = instance.nestedFrameOffset;
+
+        if (Number.isFinite(instance.nestedFrameModulo) && instance.nestedFrameModulo > 0) {
+            resolvedFrame = ((resolvedFrame % instance.nestedFrameModulo) + instance.nestedFrameModulo) % instance.nestedFrameModulo;
+        }
+
+        if (!nestedSprite[resolvedFrame.toString()] && nestedFrameCount > 0) {
+            return ((resolvedFrame % nestedFrameCount) + nestedFrameCount) % nestedFrameCount;
+        }
+
+        return resolvedFrame;
+    }
+
+    return nestedFrameCount > 1 ? parentFrame % nestedFrameCount : 0;
+}
+
+function applyInstanceTransform(instance) {
     const t = instance.transform;
     ctx.translate(t.x, t.y);
     ctx.rotate(t.rotationDeg * Math.PI / 180);
     ctx.scale(t.scaleX, t.scaleY);
+}
+
+function getTimelineFrameCount(timelineId) {
+    const data = window.animationData;
+    const sprite = data && data.sprites ? data.sprites[timelineId] : null;
+    return sprite ? Object.keys(sprite).length : 0;
+}
+
+function normalizeFrameNumber(frameNumber, frameCount) {
+    if (!frameCount) return 0;
+    return ((frameNumber % frameCount) + frameCount) % frameCount;
+}
+
+function getFrameDistance(frameA, frameB, frameCount) {
+    if (!frameCount) return Number.MAX_SAFE_INTEGER;
+    const delta = Math.abs(frameA - frameB);
+    return Math.min(delta, frameCount - delta);
+}
+
+function getTimelineFrameData(timelineId, frameNumber) {
+    const data = window.animationData;
+    if (!data || !data.sprites[timelineId]) return null;
+
+    const frameCount = getTimelineFrameCount(timelineId);
+    const normalizedFrame = normalizeFrameNumber(frameNumber, frameCount);
+    return data.sprites[timelineId][normalizedFrame.toString()] || null;
+}
+
+function findContextPathInTimeline(timelineId, timelineFrame, targetTimelineId, targetFrame, path = []) {
+    const data = window.animationData;
+    const frameData = getTimelineFrameData(timelineId, timelineFrame);
+    if (!frameData) return null;
+
+    let bestCandidate = null;
+
+    for (const instance of frameData) {
+        if (!data.sprites[instance.targetId]) continue;
+
+        const nestedSprite = data.sprites[instance.targetId];
+        const nestedFrame = resolveNestedFrame(instance, nestedSprite, timelineFrame);
+        const nextPath = path.concat({
+            instance,
+            parentTimelineId: timelineId,
+            parentFrame: timelineFrame,
+            nestedFrame
+        });
+
+        if (instance.targetId === targetTimelineId) {
+            const targetFrameCount = getTimelineFrameCount(targetTimelineId);
+            const normalizedTargetFrame = normalizeFrameNumber(targetFrame, targetFrameCount);
+            const score = getFrameDistance(nestedFrame, normalizedTargetFrame, targetFrameCount);
+            const directCandidate = {
+                path: nextPath,
+                score,
+                exact: score === 0
+            };
+
+            if (!bestCandidate || directCandidate.score < bestCandidate.score) {
+                bestCandidate = directCandidate;
+            }
+
+            if (directCandidate.exact) {
+                return directCandidate;
+            }
+        }
+
+        const nestedCandidate = findContextPathInTimeline(
+            instance.targetId,
+            nestedFrame,
+            targetTimelineId,
+            targetFrame,
+            nextPath
+        );
+
+        if (nestedCandidate && (!bestCandidate || nestedCandidate.score < bestCandidate.score)) {
+            bestCandidate = nestedCandidate;
+        }
+
+        if (bestCandidate && bestCandidate.exact) {
+            return bestCandidate;
+        }
+    }
+
+    return bestCandidate;
+}
+
+function getContextRenderState(selectedTimelineId, selectedFrame) {
+    const data = window.animationData;
+    if (!data || selectedTimelineId === data.mainTimeline) return null;
+
+    const mainTimelineId = data.mainTimeline;
+    const mainFrameCount = getTimelineFrameCount(mainTimelineId);
+    let bestCandidate = null;
+
+    for (let mainFrame = 0; mainFrame < mainFrameCount; mainFrame++) {
+        const candidate = findContextPathInTimeline(mainTimelineId, mainFrame, selectedTimelineId, selectedFrame);
+        if (!candidate) continue;
+
+        const candidateWithFrame = {
+            ...candidate,
+            mainFrame
+        };
+
+        if (!bestCandidate || candidateWithFrame.score < bestCandidate.score) {
+            bestCandidate = candidateWithFrame;
+        }
+
+        if (candidateWithFrame.exact) {
+            break;
+        }
+    }
+
+    return bestCandidate;
+}
+
+function renderTimelineFrame(timelineId, frameNumber, highlightedIndex = -1) {
+    const frameData = getTimelineFrameData(timelineId, frameNumber);
+    if (!frameData) return;
+
+    frameData.forEach((instance, index) => {
+        renderInstance(instance, index === highlightedIndex, null, frameNumber);
+    });
+}
+
+function renderEditedTimelineInContext(contextState) {
+    ctx.save();
+
+    contextState.path.forEach(step => {
+        applyInstanceTransform(step.instance);
+    });
+
+    renderTimelineFrame(timelineSelect.value, currentFrame, selectedIndex);
+    ctx.restore();
+}
+
+function renderInstance(instance, isSelected, checkHitXY = null, parentFrame = 0) {
+    let hitFound = false;
+    const data = window.animationData;
+    ctx.save();
+
+    const t = instance.transform;
+    applyInstanceTransform(instance);
 
     const targetId = instance.targetId;
 
     if (data.sprites[targetId]) {
-        // Render sub-sprite with animation based on parent frame
-        // Calculate which frame of the nested sprite to show based on modulo
         const nestedSprite = data.sprites[targetId];
-        const nestedFrameCount = Object.keys(nestedSprite).length;
-        // Use modulo to cycle through nested sprite frames based on parent frame
-        const nestedFrame = nestedFrameCount > 1 ? parentFrame % nestedFrameCount : 0;
+        const nestedFrame = resolveNestedFrame(instance, nestedSprite, parentFrame);
         const subFrame = nestedSprite[nestedFrame.toString()];
         if (subFrame) {
             subFrame.forEach(subInst => {
@@ -399,6 +576,7 @@ function renderInstance(instance, isSelected, checkHitXY = null, parentFrame = 0
     else if (data.shapes[targetId]) {
         // Render Shape
         data.shapes[targetId].forEach(shapePart => {
+            const inheritedAlpha = ctx.globalAlpha;
             ctx.beginPath();
             drawSVGPath(ctx, shapePart.pathData);
             
@@ -428,16 +606,16 @@ function renderInstance(instance, isSelected, checkHitXY = null, parentFrame = 0
                     
                     // Draw selection handles
                     ctx.fillStyle = "#00d2ff";
-                    ctx.globalAlpha = 0.3;
+                    ctx.globalAlpha = inheritedAlpha * 0.3;
                     ctx.fill("evenodd");
-                    ctx.globalAlpha = 1.0;
+                    ctx.globalAlpha = inheritedAlpha;
                 } else {
                     // Non-selected elements: slightly more visible
-                    ctx.globalAlpha = 0.85;
+                    ctx.globalAlpha = inheritedAlpha * 0.85;
                     ctx.strokeStyle = "rgba(255,255,255,0.3)";
                     ctx.lineWidth = 1 / t.scaleX;
                     ctx.stroke();
-                    ctx.globalAlpha = 1.0;
+                    ctx.globalAlpha = inheritedAlpha;
                 }
             }
         });
@@ -458,20 +636,30 @@ function draw() {
         ctx.fillText("Please Load 'animation_data.json' using the button above.", 50, 50);
         return;
     }
+
+    syncSelectionForCurrentFrame();
     
     ctx.save();
     ctx.translate(viewportOffsetX, viewportOffsetY);
     ctx.scale(viewportScale, viewportScale);
-    
-    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
-    if (frameData) {
-        frameData.forEach((instance, index) => {
-            renderInstance(instance, index === selectedIndex, null, currentFrame);
-        });
+
+    const activeTimelineId = timelineSelect.value;
+    const contextState = getContextRenderState(activeTimelineId, currentFrame);
+
+    if (contextState) {
+        ctx.save();
+        ctx.globalAlpha = contextOpacity;
+        renderTimelineFrame(data.mainTimeline, contextState.mainFrame, -1);
+        ctx.restore();
+
+        renderEditedTimelineInContext(contextState);
+    } else {
+        renderTimelineFrame(activeTimelineId, currentFrame, selectedIndex);
     }
     
     ctx.restore();
     updateLayerPanel();
+    populateProperties();
 }
 
 /**
@@ -480,19 +668,34 @@ function draw() {
 function getHitElement(mouseX, mouseY) {
     const data = window.animationData;
     if(!data) return -1;
-    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
+
+    const activeTimelineId = timelineSelect.value;
+    const frameData = getTimelineFrameData(activeTimelineId, currentFrame);
     if (!frameData) return -1;
+
+    const contextState = getContextRenderState(activeTimelineId, currentFrame);
+
+    ctx.save();
+    ctx.translate(viewportOffsetX, viewportOffsetY);
+    ctx.scale(viewportScale, viewportScale);
+
+    if (contextState) {
+        contextState.path.forEach(step => {
+            applyInstanceTransform(step.instance);
+        });
+    }
     
     // Reverse loop to select top-most element first
     for (let i = frameData.length - 1; i >= 0; i--) {
-        ctx.save();
-        ctx.translate(viewportOffsetX, viewportOffsetY);
-        ctx.scale(viewportScale, viewportScale);
         let isHit = renderInstance(frameData[i], false, {x: mouseX, y: mouseY}, currentFrame);
-        ctx.restore();
         
-        if (isHit) return i;
+        if (isHit) {
+            ctx.restore();
+            return i;
+        }
     }
+
+    ctx.restore();
     return -1;
 }
 
@@ -542,10 +745,15 @@ canvas.addEventListener('mousedown', (e) => {
             isDraggingElement = true;
             dragStartX = mouseX;
             dragStartY = mouseY;
-            
-            const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
-            initialElemX = frameData[selectedIndex].transform.x;
-            initialElemY = frameData[selectedIndex].transform.y;
+
+            const instance = getSelectedInstance();
+            if (!instance) {
+                isDraggingElement = false;
+                return;
+            }
+
+            initialElemX = instance.transform.x;
+            initialElemY = instance.transform.y;
             canvas.style.cursor = 'move';
         } else {
             // Clicked empty space: deselect & start pan
@@ -574,9 +782,13 @@ canvas.addEventListener('mousemove', (e) => {
     if (isDraggingElement && selectedIndex !== -1) {
         const dx = (mouseX - dragStartX) / viewportScale;
         const dy = (mouseY - dragStartY) / viewportScale;
-        
-        const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
-        const t = frameData[selectedIndex].transform;
+
+        const instance = getSelectedInstance();
+        if (!instance) {
+            isDraggingElement = false;
+            return;
+        }
+        const t = instance.transform;
         
         t.x = initialElemX + dx;
         t.y = initialElemY + dy;
@@ -625,6 +837,8 @@ function updateLayerPanel() {
     const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
     if (!frameData) return;
 
+    const timelineIds = new Set((data.timelines || []).map(t => t.id));
+
     frameData.forEach((instance, index) => {
         const div = document.createElement("div");
         div.id = `layer-item-${index}`;
@@ -634,8 +848,11 @@ function updateLayerPanel() {
         const isSprite = data.sprites[instance.targetId] ? " 🎬" : "";
         const spriteInfo = data.sprites[instance.targetId] ? 
             ` (${Object.keys(data.sprites[instance.targetId]).length}fr)` : "";
+        const currentSpriteFrame = timelineIds.has(instance.targetId)
+            ? ` [frame ${resolveNestedFrame(instance, data.sprites[instance.targetId], currentFrame)}]`
+            : "";
         
-        div.innerText = `Layer ${index}: ${instance.targetId}${isSprite}${spriteInfo}`;
+        div.innerText = `Layer ${index}: ${instance.targetId}${isSprite}${spriteInfo}${currentSpriteFrame}`;
         div.onclick = () => selectLayer(index);
         layerList.appendChild(div);
     });
@@ -650,20 +867,18 @@ function selectLayer(index) {
         if(el) el.classList.add('active');
     }
     
-    populateProperties();
     draw();
 }
 
 function populateProperties() {
     const data = window.animationData;
-    if (selectedIndex === -1) {
+    const instance = getSelectedInstance();
+
+    if (!data || !instance) {
         propPanel.style.display = "none";
         noSelMsg.style.display = "block";
         return;
     }
-    
-    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
-    const instance = frameData[selectedIndex];
     
     propPanel.style.display = "block";
     noSelMsg.style.display = "none";
@@ -676,10 +891,9 @@ function populateProperties() {
 }
 
 function applyPropertyChanges() {
-    const data = window.animationData;
-    if (selectedIndex === -1) return;
-    const frameData = data.sprites[timelineSelect.value][currentFrame.toString()];
-    const t = frameData[selectedIndex].transform;
+    const instance = getSelectedInstance();
+    if (!instance) return;
+    const t = instance.transform;
     
     t.x = parseFloat(pX.value) || 0;
     t.y = parseFloat(pY.value) || 0;
@@ -693,13 +907,18 @@ function applyPropertyChanges() {
     inp.addEventListener('input', applyPropertyChanges);
 });
 
+contextOpacitySlider.addEventListener('input', (e) => {
+    contextOpacity = parseInt(e.target.value, 10) / 100;
+    contextOpacityValue.innerText = `${e.target.value}%`;
+    draw();
+});
+
 // Timeline Controls
 slider.addEventListener('input', (e) => {
     const data = window.animationData;
     if(!data) return;
     currentFrame = parseInt(e.target.value, 10);
     frameCounter.innerText = `Frame: ${currentFrame}`;
-    selectLayer(-1);
     draw();
 });
 

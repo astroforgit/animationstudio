@@ -33,6 +33,56 @@ function decomposeMatrix(matrix) {
     };
 }
 
+function parseNestedFrameExpression(expression) {
+    const trimmed = expression.trim();
+    const timeOffsetMatch = trimmed.match(/^\((-?\d+)\+time\)%(\d+)$/);
+    if (timeOffsetMatch) {
+        return {
+            nestedFrameExpression: trimmed,
+            nestedFrameOffset: parseInt(timeOffsetMatch[1], 10),
+            nestedFrameModulo: parseInt(timeOffsetMatch[2], 10),
+            nestedFrameUsesTime: true
+        };
+    }
+
+    const timeOnlyMatch = trimmed.match(/^\(?time\)?%(\d+)$/);
+    if (timeOnlyMatch) {
+        return {
+            nestedFrameExpression: trimmed,
+            nestedFrameOffset: 0,
+            nestedFrameModulo: parseInt(timeOnlyMatch[1], 10),
+            nestedFrameUsesTime: true
+        };
+    }
+
+    const fixedModuloMatch = trimmed.match(/^\(?(-?\d+)\)?%(\d+)$/);
+    if (fixedModuloMatch) {
+        return {
+            nestedFrameExpression: trimmed,
+            nestedFrameOffset: parseInt(fixedModuloMatch[1], 10),
+            nestedFrameModulo: parseInt(fixedModuloMatch[2], 10),
+            nestedFrameUsesTime: false
+        };
+    }
+
+    const numericMatch = trimmed.match(/^-?\d+$/);
+    if (numericMatch) {
+        return {
+            nestedFrameExpression: trimmed,
+            nestedFrameOffset: parseInt(trimmed, 10),
+            nestedFrameModulo: null,
+            nestedFrameUsesTime: false
+        };
+    }
+
+    return {
+        nestedFrameExpression: trimmed,
+        nestedFrameOffset: null,
+        nestedFrameModulo: null,
+        nestedFrameUsesTime: false
+    };
+}
+
 function extractAnimationData(htmlContent) {
     const data = {
         shapes: {},
@@ -45,7 +95,7 @@ function extractAnimationData(htmlContent) {
     // Regex to find shape functions
     const shapeRegex = /function (shape\d+)\([^)]*\)\s*\{([\s\S]*?)\n\}/g;
     let shapeMatch;
-    
+
     while ((shapeMatch = shapeRegex.exec(htmlContent)) !== null) {
         const shapeId = shapeMatch[1];
         const body = shapeMatch[2];
@@ -54,7 +104,7 @@ function extractAnimationData(htmlContent) {
         // Regex to find path string, color, and if it is filled or stroked
         const pathRegex = /pathData="([^"]+)"[\s\S]*?(fillStyle|strokeStyle)\s*=\s*tocolor\(ctrans\.apply\(\[([\d.,\s]+)\]\)\)[\s\S]*?drawPath\([^,]+,\s*[^,]+,\s*(true|false)\)/g;
         let pathMatch;
-        
+
         while ((pathMatch = pathRegex.exec(body)) !== null) {
             elements.push({
                 type: pathMatch[2] === 'fillStyle' ? 'fill' : 'stroke',
@@ -87,24 +137,26 @@ function extractAnimationData(htmlContent) {
             const caseBody = caseMatch[2];
             const instances =[];
 
-            // Extract the place() commands
-            const placeRegex = /place\("([^"]+)",[^\[]+\[([^\]]+)\]/g;
+            // Extract the place() commands, including the nested frame argument.
+            const placeRegex = /place\("([^"]+)",\s*canvas,\s*ctx,\s*\[([^\]]+)\],\s*ctrans,\s*[^,]+,\s*([^,]+),\s*[^,]+,\s*time\);/g;
             let placeMatch;
-            
+
             while ((placeMatch = placeRegex.exec(caseBody)) !== null) {
                 const targetId = placeMatch[1];
                 const rawMatrix = placeMatch[2].split(',').map(Number);
-                
+                const nestedFrameMeta = parseNestedFrameExpression(placeMatch[3]);
+
                 instances.push({
                     targetId: targetId, // ID of the shape or nested sprite being placed
                     rawMatrix: rawMatrix,
-                    transform: decomposeMatrix(rawMatrix) // Friendly X,Y, Rotation, Scale
+                    transform: decomposeMatrix(rawMatrix), // Friendly X,Y, Rotation, Scale
+                    ...nestedFrameMeta
                 });
             }
             frames[frameNum] = instances;
             frameCount++;
         }
-        
+
         data.sprites[spriteId] = frames;
     }
 
@@ -112,11 +164,11 @@ function extractAnimationData(htmlContent) {
     // This is likely the container sprite that wraps all other sprites
     let bestCandidate = data.mainTimeline; // fallback to current detection
     let maxSpriteReferences = 0;
-    
+
     for (const spriteId in data.sprites) {
         let spriteRefCount = 0;
         const spriteFrames = data.sprites[spriteId];
-        
+
         // Check all frames for sprite references
         for (const frameKey in spriteFrames) {
             const frame = spriteFrames[frameKey];
@@ -127,21 +179,21 @@ function extractAnimationData(htmlContent) {
                 }
             }
         }
-        
+
         // The sprite that references the most other sprites is likely the main timeline
         if (spriteRefCount > maxSpriteReferences) {
             maxSpriteReferences = spriteRefCount;
             bestCandidate = spriteId;
         }
     }
-    
+
     if (bestCandidate) {
         data.mainTimeline = bestCandidate;
     }
-    
+
     // First pass: collect parent-child relationships
     const spriteParents = {}; // spriteId -> array of parent sprite IDs
-    
+
     for (const spriteId in data.sprites) {
         const spriteFrames = data.sprites[spriteId];
         for (const frameKey in spriteFrames) {
@@ -159,7 +211,7 @@ function extractAnimationData(htmlContent) {
             }
         }
     }
-    
+
     // Second pass: create timelines using collected parent info
     for (const spriteId in data.sprites) {
         const frameCount = Object.keys(data.sprites[spriteId]).length;
@@ -175,7 +227,7 @@ function extractAnimationData(htmlContent) {
             }
             if (isContainer) break;
         }
-        
+
         if (frameCount > 1 || isContainer) {
             const parents = spriteParents[spriteId] || [];
             data.timelines.push({
@@ -186,7 +238,7 @@ function extractAnimationData(htmlContent) {
             });
         }
     }
-    
+
     // Sort timelines: main first, then by frame count descending
     data.timelines.sort((a, b) => {
         if (a.id === data.mainTimeline) return -1;
@@ -205,10 +257,10 @@ function extractAnimationData(htmlContent) {
 try {
     const htmlData = fs.readFileSync(INPUT_FILE, 'utf8');
     const extractedData = extractAnimationData(htmlData);
-    
+
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(extractedData, null, 2));
     console.log(`\nSuccess! JSON saved to ${OUTPUT_FILE}`);
-    
+
 } catch (error) {
     console.error("Error reading or processing the file:", error.message);
 }
